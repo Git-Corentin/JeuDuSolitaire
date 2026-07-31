@@ -131,6 +131,7 @@ class Application:
             self.can,
             image=self.res.jouer,
             borderwidth=0,
+            highlightthickness=0,
             command=self.nouvelle_partie,
         )
         self._placer(self.bouton_jouer, 370, config.Y_BOUTON_JOUER, "center")
@@ -143,6 +144,7 @@ class Application:
             value=1,
             indicatoron=0,
             borderwidth=0,
+            highlightthickness=0,
         )
         self._placer(self.radio_une, 255, config.Y_RADIOS, "center")
         self.radio_trois = tk.Radiobutton(
@@ -153,17 +155,19 @@ class Application:
             value=3,
             indicatoron=0,
             borderwidth=0,
+            highlightthickness=0,
         )
         self._placer(self.radio_trois, 485, config.Y_RADIOS, "center")
 
         self.bouton_parametre = tk.Button(
-            self.can, image=self.res.parametre, borderwidth=0, command=self.choisir_fond
+            self.can, image=self.res.parametre, borderwidth=0, highlightthickness=0, command=self.choisir_fond
         )
         self._placer(self.bouton_parametre, 255, config.Y_BOUTONS_OUTILS, "center")
         self.bouton_indice = tk.Button(
             self.can,
             image=self.res.indice_inactif,
             borderwidth=0,
+            highlightthickness=0,
             command=self.basculer_indice,
         )
         self._placer(self.bouton_indice, 485, config.Y_BOUTONS_OUTILS, "center")
@@ -173,6 +177,7 @@ class Application:
             text="Analyser la partie  (A)",
             font=police_bouton,
             borderwidth=0,
+            highlightthickness=0,
             command=self.lancer_analyse,
         )
         self._placer(self.bouton_analyse, 370, config.Y_BOUTON_ANALYSE, "center")
@@ -181,6 +186,7 @@ class Application:
             text="Annuler le coup  (Ctrl+Z)",
             font=police_bouton,
             borderwidth=0,
+            highlightthickness=0,
             command=self.annuler_coup,
         )
         self._placer(self.bouton_annuler, 370, config.Y_BOUTON_ANNULER, "center")
