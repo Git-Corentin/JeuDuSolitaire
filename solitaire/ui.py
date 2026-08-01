@@ -21,14 +21,16 @@ from __future__ import annotations
 import time
 import tkinter as tk
 from colorsys import rgb_to_hls
-from tkinter import TclError, colorchooser, messagebox
+from tkinter import TclError, messagebox
 
 from . import config, solveur
 from .assets import Ressources, choisir_echelle
+from .parametres import FenetreParametres, Reglages
 from .partie import Coup, Partie
 
-COULEUR_SURLIGNAGE = "#ffd400"
-COULEUR_DESTINATION = "#ff5252"
+#: Distance (en pixels) au-delà de laquelle un appui suivi d'un mouvement est
+#: interprété comme un glisser-déposer et non comme un simple clic.
+SEUIL_GLISSER = 8
 
 
 def maximiser(fenetre: tk.Tk) -> None:
@@ -80,8 +82,7 @@ class Application:
         except TclError:  # pragma: no cover
             pass
 
-        self.couleur_fond = config.COULEUR_FOND_DEFAUT
-        self.couleur_texte = "white"
+        self.reglages = Reglages()
 
         self.partie: Partie | None = None
         self.graine = graine
@@ -92,10 +93,15 @@ class Application:
         self.coup_indice: Coup | None = None
         self.solution: list[Coup] = []
         self._gen_analyse = None  # générateur de recherche en cours, ou None
+        self._gen_suspendu = None  # recherche non concluante, prête à reprendre
+        self._budget_analyse = solveur.Budget()
+        self._cle_analyse = None
         self._copie_analyse: Partie | None = None
         self._depart_analyse = 0.0
         self._coups_au_lancement_analyse = 0
         self.fin_proposee = False
+        self._appui: tuple[int, int] | None = None
+        self._glisse = False
 
         self.var_tirage = tk.IntVar(value=tirage)
 
@@ -111,7 +117,7 @@ class Application:
     def _construire_interface(self) -> None:
         self.can = tk.Canvas(
             self.fen,
-            bg=self.couleur_fond,
+            bg=self.reglages.couleur_fond,
             highlightthickness=0,
             width=self.fen.winfo_screenwidth(),
             height=self.fen.winfo_screenheight(),
@@ -160,7 +166,11 @@ class Application:
         self._placer(self.radio_trois, 485, config.Y_RADIOS, "center")
 
         self.bouton_parametre = tk.Button(
-            self.can, image=self.res.parametre, borderwidth=0, highlightthickness=0, command=self.choisir_fond
+            self.can,
+            image=self.res.parametre,
+            borderwidth=0,
+            highlightthickness=0,
+            command=self.ouvrir_parametres,
         )
         self._placer(self.bouton_parametre, 255, config.Y_BOUTONS_OUTILS, "center")
         self.bouton_indice = tk.Button(
@@ -195,12 +205,15 @@ class Application:
             self.can,
             text="",
             font=f"Cambria {max(8, px(17))}",
+            highlightthickness=0,
             wraplength=px(660),
             justify="center",
         )
         self._placer(self.label_message, 370, config.Y_MESSAGE, "center")
 
         self.can.bind("<Button-1>", self.clic_gauche)
+        self.can.bind("<ButtonRelease-1>", self.relachement_gauche)
+        self.can.bind("<B1-Motion>", self.deplacer_selection)
         self.can.bind("<Double-Button-1>", self.double_clic)
         self.can.bind("<Button-3>", lambda _e: self.annuler_selection())
         self.can.bind("<Motion>", self.deplacer_selection)
@@ -228,16 +241,16 @@ class Application:
         ]
 
     def _appliquer_couleurs(self) -> None:
-        self.can.configure(bg=self.couleur_fond)
+        self.can.configure(bg=self.reglages.couleur_fond)
         for widget in (self.label_temps, self.label_score, self.label_message):
-            widget.configure(bg=self.couleur_fond, fg=self.couleur_texte)
+            widget.configure(bg=self.reglages.couleur_fond, fg=self.reglages.couleur_texte)
         for widget in self._widgets_colores():
-            widget.configure(bg=self.couleur_fond, activebackground=self.couleur_fond)
+            widget.configure(bg=self.reglages.couleur_fond, activebackground=self.reglages.couleur_fond)
             if isinstance(widget, tk.Radiobutton):
-                widget.configure(selectcolor=self.couleur_fond)
+                widget.configure(selectcolor=self.reglages.couleur_fond)
             if isinstance(widget, tk.Button) and widget.cget("text"):
                 widget.configure(
-                    fg=self.couleur_texte, activeforeground=self.couleur_texte
+                    fg=self.reglages.couleur_texte, activeforeground=self.reglages.couleur_texte
                 )
 
     # ------------------------------------------------------------------
@@ -263,6 +276,10 @@ class Application:
         self.coup_indice = None
         self.indice_actif = False
         self.fin_proposee = False
+        self._gen_suspendu = None
+        self._cle_analyse = None
+        self._appui: tuple[int, int] | None = None
+        self._glisse = False
         self.bouton_indice.configure(image=self.res.indice_inactif)
         self.chrono_secondes = 0
         self.chrono_actif = True
@@ -483,23 +500,23 @@ class Application:
             return
         # Origine
         if coup.est_pioche:
-            self._cadre(self.res.point(config.COORD_PIOCHE), 0, COULEUR_SURLIGNAGE)
+            self._cadre(self.res.point(config.COORD_PIOCHE), 0, self.reglages.couleur_surlignage)
             return
         if coup.origine == "colonne":
             positions = self.positions_colonne(coup.i_origine)
             depart = positions[len(positions) - coup.nb]
             supplement = self.res.px(config.ECART_VISIBLE) * (coup.nb - 1)
-            self._cadre(depart, supplement, COULEUR_SURLIGNAGE)
+            self._cadre(depart, supplement, self.reglages.couleur_surlignage)
         elif coup.origine == "defausse":
             nb = min(self.partie.cartes_par_tirage, len(self.partie.defausse), 3)
             self._cadre(
-                self.res.point(config.COORDS_DEFAUSSE[nb - 1]), 0, COULEUR_SURLIGNAGE
+                self.res.point(config.COORDS_DEFAUSSE[nb - 1]), 0, self.reglages.couleur_surlignage
             )
         else:
             self._cadre(
                 self.res.point(config.COORDS_BASES[coup.i_origine]),
                 0,
-                COULEUR_SURLIGNAGE,
+                self.reglages.couleur_surlignage,
             )
         # Destination
         if coup.destination == "base":
@@ -510,7 +527,7 @@ class Application:
             cible = self.position_libre_colonne(coup.i_destination)
             if self.partie.colonnes[coup.i_destination].est_vide:
                 self._image(cible, self.res.repere(1))
-        self._cadre(cible, 0, COULEUR_DESTINATION, tirets=(6, 4))
+        self._cadre(cible, 0, self.reglages.couleur_destination, tirets=(6, 4))
 
     def _dessiner_selection(self, x: int, y: int) -> None:
         """Fait suivre le curseur aux cartes tenues en main."""
@@ -542,11 +559,30 @@ class Application:
     def clic_gauche(self, event) -> None:
         if self.partie is None:
             return
+        self._appui = (event.x, event.y)
+        self._glisse = False
         zone = self.zone(event.x, event.y)
         if self.selection is None:
             self._prendre(zone, event)
         else:
             self._poser(zone, event)
+
+    def relachement_gauche(self, event) -> None:
+        """Fin d'un glisser-déposer.
+
+        Les deux modes cohabitent naturellement : si la souris n'a pas bougé
+        entre l'appui et le relâchement, on est dans le mode clic-clic
+        historique et on ne fait rien (les cartes restent en main) ; si elle a
+        franchi :data:`SEUIL_GLISSER`, c'est un glisser-déposer et on pose.
+        """
+        if (
+            not self.reglages.glisser_deposer
+            or self.selection is None
+            or not self._glisse
+        ):
+            return
+        self._glisse = False
+        self._poser(self.zone(event.x, event.y), event)
 
     def _prendre(self, zone, event) -> None:
         if zone is None:
@@ -611,8 +647,14 @@ class Application:
         )
 
     def deplacer_selection(self, event) -> None:
-        if self.selection:
-            self._dessiner_selection(event.x, event.y)
+        if not self.selection:
+            return
+        if self._appui is not None and not self._glisse:
+            dx = event.x - self._appui[0]
+            dy = event.y - self._appui[1]
+            if dx * dx + dy * dy > SEUIL_GLISSER * SEUIL_GLISSER:
+                self._glisse = True
+        self._dessiner_selection(event.x, event.y)
 
     def annuler_selection(self) -> None:
         if self.selection:
@@ -677,15 +719,40 @@ class Application:
             return False
         self.selection = None
         self.can.delete("main_joueur")
-        if self.solution and self.solution[0] == coup:
-            self.solution.pop(0)
-        elif self.solution:
-            self.solution = []
+        self._resynchroniser_solution(coup)
         self._maj_indice()
         self.message("")
         self.redessiner()
         self._verifier_fin()
         return True
+
+    def _resynchroniser_solution(self, coup: Coup) -> None:
+        """Met à jour la solution mémorisée après un coup du joueur.
+
+        Trois cas : le joueur a joué le coup prévu (on avance d'un cran) ; il a
+        joué autre chose mais la suite reste intégralement jouable (on la garde
+        telle quelle — c'est fréquent, par exemple s'il monte une carte sur une
+        base plus tôt que prévu) ; ou la suite est devenue impossible et on
+        l'abandonne. Auparavant la solution était jetée à la moindre
+        divergence, et l'aide retombait aussitôt sur l'indice heuristique.
+        """
+        if not self.solution:
+            return
+        if self.solution[0] == coup:
+            self.solution.pop(0)
+            return
+        if solveur.verifier_solution(self.partie, self.solution):
+            return
+        # Peut-être le joueur a-t-il simplement joué un coup présent plus loin
+        # dans la solution : on tente de repartir juste après.
+        for i, prevu in enumerate(self.solution):
+            if prevu == coup and solveur.verifier_solution(
+                self.partie, self.solution[i + 1:]
+            ):
+                del self.solution[: i + 1]
+                return
+        self.solution = []
+        self.message("La solution mémorisée n'est plus valable : relancez l'analyse.")
 
     def _verifier_fin(self) -> None:
         partie = self.partie
@@ -729,7 +796,9 @@ class Application:
                 return
             self.partie.appliquer(reste[0])
             self.redessiner()
-            self.fen.after(40, suivant, reste[1:])
+            self.fen.after(
+                self.reglages.ms_par_coup_finition, suivant, reste[1:]
+            )
 
         suivant(coups)
 
@@ -756,8 +825,9 @@ class Application:
             self.bouton_indice.configure(image=self.res.indice_inactif)
             if messagebox.askyesno(
                 "Indice",
-                "Aucun coup n'est possible.\n\nVoulez-vous commencer une "
-                "nouvelle partie ?",
+                "Aucun coup utile ne reste : tous les déplacements possibles "
+                "ramènent à une position déjà rencontrée, la partie tourne en "
+                "rond.\n\nVoulez-vous commencer une nouvelle partie ?",
             ):
                 self.nouvelle_partie(confirmer=False)
             return
@@ -773,7 +843,9 @@ class Application:
             coup = self.solution[0]
             suffixe = f"  (solution : {len(self.solution)} coups restants)"
         else:
-            coup = solveur.meilleur_coup(self.partie)
+            coup = solveur.meilleur_coup(
+                self.partie, eviter_retours=self.reglages.eviter_retours_indice
+            )
             suffixe = ""
         self.coup_indice = coup
         self.message(coup.description() + suffixe if coup else "")
@@ -791,6 +863,26 @@ class Application:
         if self.partie is None or self._gen_analyse is not None:
             return
         self.annuler_selection()
+
+        # Relance sur la même position : on prolonge le budget et on reprend la
+        # recherche précédente au lieu de tout recommencer.
+        if (
+            self._gen_suspendu is not None
+            and self._cle_analyse == self.partie.cle_etat()
+        ):
+            self._budget_analyse.prolonger(
+                self.reglages.duree_analyse, self.reglages.noeuds_analyse
+            )
+            self._gen_analyse = self._gen_suspendu
+            self._gen_suspendu = None
+            self.bouton_analyse.configure(state=tk.DISABLED)
+            self.message(
+                f"Analyse reprise (budget porté à "
+                f"{self._budget_analyse.max_noeuds:,} positions)…".replace(",", " ")
+            )
+            self.fen.after_idle(self._pas_analyse)
+            return
+
         depart = time.monotonic()
         copie = self.partie.copie()
         etat = solveur.etat_compact(copie)
@@ -806,13 +898,14 @@ class Application:
             self._appliquer_resultat_analyse(resultat, self.partie.nb_coups)
             return
 
-        self._gen_analyse = solveur._recherche_iter(
-            etat,
-            copie.cartes_par_tirage,
-            config.MAX_NOEUDS_SOLVEUR,
-            config.MAX_SECONDES_SOLVEUR,
-            depart,
+        self._budget_analyse = solveur.Budget(
+            self.reglages.noeuds_analyse, self.reglages.duree_analyse, depart
         )
+        self._gen_analyse = solveur._recherche_iter(
+            etat, copie.cartes_par_tirage, self._budget_analyse
+        )
+        self._gen_suspendu = None
+        self._cle_analyse = self.partie.cle_etat()
         self._copie_analyse = copie
         self._depart_analyse = depart
         self._coups_au_lancement_analyse = self.partie.nb_coups
@@ -841,8 +934,12 @@ class Application:
     def _terminer_analyse(self, verdict: str, donnee, noeuds: int) -> None:
         duree = time.monotonic() - self._depart_analyse
         copie = self._copie_analyse
+        # Une recherche non concluante est mise de côté, pas jetée : elle
+        # pourra reprendre exactement où elle en est.
+        self._gen_suspendu = self._gen_analyse if verdict == "indetermine" else None
         self._gen_analyse = None
-        self._copie_analyse = None
+        if verdict != "indetermine":
+            self._copie_analyse = None
         self.bouton_analyse.configure(state=tk.NORMAL)
 
         if verdict == "gagnable":
@@ -892,12 +989,15 @@ class Application:
     # Paramètres
     # ------------------------------------------------------------------
 
-    def choisir_fond(self) -> None:
-        couleur = colorchooser.askcolor(self.couleur_fond, title="Couleur de fond")
-        if couleur[0] is None:
-            return
-        rouge, vert, bleu = couleur[0]
-        self.couleur_fond = couleur[1]
-        luminosite = rgb_to_hls(rouge / 255, vert / 255, bleu / 255)[1]
-        self.couleur_texte = "black" if luminosite >= 0.5 else "white"
-        self._appliquer_couleurs()
+    def ouvrir_parametres(self) -> None:
+        """Ouvre la fenêtre de réglages (apparence, solveur, confort de jeu)."""
+        FenetreParametres(self.fen, self.reglages, self._parametre_modifie)
+
+    def _parametre_modifie(self, attribut: str, rvb=None) -> None:
+        """Applique immédiatement un réglage modifié."""
+        if attribut == "couleur_fond":
+            if rvb is not None:
+                luminosite = rgb_to_hls(rvb[0] / 255, rvb[1] / 255, rvb[2] / 255)[1]
+                self.reglages.couleur_texte = "black" if luminosite >= 0.5 else "white"
+            self._appliquer_couleurs()
+        self.redessiner()

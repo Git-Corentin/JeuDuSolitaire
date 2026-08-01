@@ -25,9 +25,13 @@ ROUGE = "rouge"
 NOIR = "noir"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, order=True)
 class Carte:
-    """Une carte, caractérisée par sa valeur (1 = As, 13 = Roi) et son symbole."""
+    """Une carte, caractérisée par sa valeur (1 = As, 13 = Roi) et son symbole.
+
+    Les cartes sont ordonnables (par valeur puis symbole) : c'est ce qui permet
+    de trier les colonnes pour construire une clé de position canonique.
+    """
 
     valeur: int
     symbole: str

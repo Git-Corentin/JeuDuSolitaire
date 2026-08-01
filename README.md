@@ -47,6 +47,7 @@ python main.py --tirage 3 --graine 2026
 | --- | --- |
 | Prendre une carte (ou un paquet de cartes) | clic gauche dessus |
 | Poser les cartes tenues | clic gauche sur la destination |
+| Glisser-déposer | maintenir le clic et relâcher sur la destination |
 | Reposer les cartes tenues | clic droit, `Échap`, ou clic hors du plateau |
 | Envoyer une carte automatiquement (base, sinon colonne) | double-clic |
 | Piocher | clic sur la pioche, ou `Espace` |
@@ -56,9 +57,23 @@ python main.py --tirage 3 --graine 2026
 | Analyser la partie | `A` (ou le bouton) |
 | Nouvelle partie | `N` (ou le bouton JOUER) |
 
+Les deux modes de manipulation cohabitent : un clic simple prend les cartes et
+un second clic les pose (pratique pour viser tranquillement), tandis qu'un clic
+maintenu puis relâché fait un glisser-déposer classique. C'est la distance
+parcourue avant le relâchement qui distingue les deux.
+
 Le mode de tirage (1 ou 3 cartes) se choisit avec les deux boutons du menu
-**avant** de lancer une partie. Le bouton engrenage change la couleur du fond
-(la couleur du texte s'adapte automatiquement).
+**avant** de lancer une partie. Le bouton engrenage ouvre les **paramètres** :
+
+| Réglage | Effet |
+| --- | --- |
+| Couleur du fond | la couleur du texte s'adapte automatiquement au contraste |
+| Couleurs de l'indice | surlignage de l'origine et de la destination |
+| Durée maximale d'une analyse | budget en secondes (défaut : 20 s) |
+| Positions explorées au maximum | budget en nombre de positions (défaut : 1 500 000) |
+| Glisser-déposer | activer ou désactiver, le clic-clic restant toujours disponible |
+| Indice sans retour en arrière | interdire les coups menant à une position déjà vue |
+| Finition automatique | vitesse de l'animation, en ms par coup |
 
 ---
 
@@ -91,9 +106,17 @@ Deux outils complémentaires, tous deux dans `solitaire/solveur.py`.
 
 `meilleur_coup()` note tous les coups légaux et propose le meilleur selon une
 heuristique simple : montées « sûres » vers les bases d'abord, puis les coups
-qui découvrent une carte cachée, puis la défausse, etc. La carte à déplacer est
+qui découvrent une carte cachée, puis la défausse, puis la pioche, et enfin
+seulement les déplacements qui ne font rien progresser. La carte à déplacer est
 encadrée en jaune, la destination en rouge pointillé, et le coup est décrit en
 toutes lettres sous le menu.
+
+Surtout, **l'indice ne peut plus tourner en rond** : la partie mémorise
+l'empreinte de chaque position traversée (`Partie.etats_vus`), et tout coup qui
+y ramènerait est écarté. Le classique « déplace ce paquet, remets-le,
+redéplace-le… » est ainsi impossible par construction. Si *tous* les coups
+possibles ramènent à du déjà-vu, l'aide le dit franchement au lieu de faire
+tourner le joueur indéfiniment.
 
 ### 2. Analyse (recherche exhaustive)
 
@@ -119,14 +142,34 @@ Ce qui rend la recherche praticable :
 * **coupe des coups inutiles** : déménager une colonne entière vers une autre
   colonne vide, redescendre une carte d'une base sans qu'aucune carte
   disponible puisse s'y accrocher, etc. ;
+* **coupe des coups nuls** : déplacer une carte d'un parent vers un parent
+  *équivalent* (même valeur, même couleur — par exemple un valet passant d'une
+  dame noire à l'autre) ne change rien à la position. Sans cette règle, la
+  recherche fait osciller une carte entre deux colonnes et produit des
+  solutions absurdes : sur une donne d'essai, le valet de cœur était déplacé
+  95 fois et le 9 de cœur 130 fois, pour 425 coups inutiles sur 549. Avec la
+  règle, la même donne se résout en 163 coups sans qu'aucune carte ne soit
+  déplacée deux fois, et la recherche est passée de 947 à 144 positions
+  explorées ;
 * **détection de position ouverte** : dès qu'il ne reste plus aucune carte
   face cachée, la victoire est certaine ; la fin de partie est alors produite
   par un algorithme glouton au lieu d'être cherchée.
 
-L'analyse tourne dans un fil d'exécution séparé (l'interface reste réactive) et
-peut être interrompue par `Échap`. Budget par défaut : 1 500 000 positions ou
-20 secondes (constantes `MAX_NOEUDS_SOLVEUR` et `MAX_SECONDES_SOLVEUR` dans
-`solitaire/config.py`). À titre indicatif, la plupart des donnes sont tranchées
+L'analyse ne bloque pas l'interface, mais **pas au moyen d'un thread** : Tk et
+Xlib s'accommodent mal qu'un second thread existe en parallèle du thread
+principal, même s'il ne touche à aucun widget (c'est exactement le plantage
+`[xcb] Unknown sequence number` / `XInitThreads` que l'on peut rencontrer sous
+Linux). La recherche est donc un générateur Python, repris par petits lots
+d'environ 20 ms via `fen.after()` : tout se passe dans le thread principal, et
+l'interface reste réactive de la même façon. Elle peut être interrompue par
+`Échap`. Budget par défaut : 1 500 000 positions ou 20 secondes, réglable dans
+les paramètres.
+
+Une analyse non concluante n'est pas perdue : le générateur reste **en pause**
+avec toute sa table de transposition. Relancer l'analyse sur la même position
+prolonge le budget et **reprend l'exploration exactement où elle s'était
+arrêtée** — relancer trois fois explore donc trois budgets cumulés, et non
+trois fois les mêmes positions. À titre indicatif, la plupart des donnes sont tranchées
 en moins d'une seconde ; quelques-unes résistent au budget complet.
 
 Quand toutes les cartes sont retournées, le jeu propose de **terminer
@@ -169,118 +212,10 @@ ui.py  ──►  partie.py  ◄──  solveur.py
 python -m unittest discover -s tests -t .
 ```
 
-Vingt tests couvrent la donne, les règles, la pioche et son recyclage,
+Vingt-quatre tests couvrent la donne, les règles, la pioche et son recyclage,
 l'annulation, la validité des coups conseillés et la validité des solutions
 produites par le solveur (chaque solution trouvée est rejouée sur le modèle et
-doit aboutir à une victoire).
-
----
-
-## Ce qui a changé par rapport à la version d'origine
-
-### Compatibilité et lancement
-
-* **`fen.wm_state(newstate='zoomed')`** n'existe que sous Windows ; sous Linux,
-  Tk répond `bad argument "zoomed": must be normal, iconic, or withdrawn`.
-  La fonction `maximiser()` essaie successivement `state('zoomed')`,
-  l'attribut `-zoomed` (Linux) puis une géométrie plein écran explicite.
-* **`fen.iconbitmap("Images/icone.ico")`** : le fichier `.ico` était absent du
-  projet et ce format n'est pas géré hors Windows → remplacé par `iconphoto()`
-  avec une image PNG, dans un `try/except`.
-* Les chemins `"Images/…"` étaient relatifs au **répertoire courant** : le jeu
-  ne démarrait que s'il était lancé depuis son propre dossier. Ils sont
-  maintenant calculés à partir de l'emplacement du module.
-* `from numpy import *` + `from random import *` + `from time import *` :
-  trois imports globaux qui s'écrasaient mutuellement (`random`, `shuffle`,
-  `seed`, `sample` existent dans plusieurs de ces modules). numpy ne servait
-  qu'à créer deux tableaux `zeros((19, 7))` : la dépendance a été supprimée,
-  le projet n'utilise plus que la bibliothèque standard.
-* Le jeu supposait un très grand écran (coordonnées en dur, cartes de
-  140 × 196 px, plateau large de 1 870 px). L'échelle est maintenant choisie
-  automatiquement selon la résolution (`--echelle` permet de la forcer) et le
-  plateau est centré.
-
-### Bugs corrigés
-
-* **L'indice ne proposait jamais de monter une carte du tableau vers une
-  base** : `if carte == derniere_carte_colonne(colonne)` comparait un *nom de
-  carte* (`"Q_pique"`) à un *couple de coordonnées* `(ligne, colonne)` — la
-  condition était toujours fausse. Le même test erroné existait dans `indice2`.
-* **Cartes téléportées dans la dernière colonne** : en relâchant une carte
-  hors du plateau après l'avoir prise dans la main ou sur une base,
-  `zone_prelev[2]` et `zone_pose[2]` valaient tous deux `-1`, donc
-  `test_tas_possible()` renvoyait `True` et `derniere_carte_colonne(-1)`
-  désignait… la colonne 6 (indice négatif Python).
-* **`indice2()` (la recherche de solution) était irrécupérable** :
-  `mem_bases.copy()` ne faisait qu'une copie *superficielle* — les quatre
-  listes de bases restaient partagées entre tous les états explorés ;
-  `supprimer_plateau_et_visible()` et `ajouter_bases()` modifiaient leurs
-  arguments au lieu de renvoyer des copies ; `test_fin()` déclarait la victoire
-  dès que la pioche était vide ; la boucle s'arrêtait à `n == 100` ; un
-  `try/except` nu masquait une `IndexError`. Surtout, elle était appelée par
-  `print(indice2())` **à chaque nouvelle partie**, ce qui figeait l'interface au
-  démarrage. Elle a été réécrite de zéro (voir « Analyse » plus haut).
-* **Score « farmable »** : `score_a_jour(5, …)` n'enregistrait pas la carte dans
-  `liste_score` ; il suffisait de faire l'aller-retour défausse → colonne pour
-  gagner 5 points à l'infini. Le barème complet a été implémenté, avec
-  pénalités.
-* **Le chronomètre** tournait dans un `Thread` avec `while True` et un
-  `except:` nu qui avalait toutes les erreurs ; il survivait à la fermeture de
-  la fenêtre. Il utilise désormais `fen.after(1000, …)`, dans la boucle
-  d'événements Tk.
-* **Fuite de widgets** : `effacer_plateau()` détruisait le canevas à chaque
-  partie, mais les boutons/labels étaient recréés à l'identique par-dessus.
-  L'interface est maintenant construite une seule fois ; seul le dessin change.
-* `global cartes_bases_bases` dans `double_clic` : variable inexistante
-  (faute de frappe sans effet, mais révélatrice du problème des 40 variables
-  globales).
-* Les images de repère, opaques, étaient dessinées **par-dessus** les cartes :
-  l'indice masquait ce qu'il désignait. Le surlignage est désormais un cadre
-  jaune (origine) et un cadre rouge pointillé (destination) ; l'image de repère
-  n'est utilisée que pour marquer un emplacement *vide*.
-* La détection « ce clic porte-t-il sur la dernière carte du tas ? » comparait
-  des noms de cartes (`plateau[coord] == plateau[derniere_carte_colonne(...)]`),
-  ce qui était vrai pour deux cases vides. La position est maintenant calculée
-  géométriquement à partir des listes de cartes.
-* Le tableau `faces_visibles` mélangeait quatre significations dans un seul
-  entier (0 = case vide, 1 = carte cachée, 2 = rouge visible, 3 = noire
-  visible), et le tableau `19 × 7` imposait une hauteur de colonne arbitraire.
-  Remplacés par des objets `Colonne(cachees, visibles)`.
-* Retourner une carte cachée demandait un clic explicite ; c'est désormais
-  automatique (règle standard), ce qui supprime toute une classe d'états
-  incohérents.
-
-### Ajouts
-
-* Annulation illimitée des coups (`Ctrl+Z`).
-* Finition automatique quand la partie est « ouverte ».
-* Raccourcis clavier, messages explicatifs sous le menu.
-* Donne reproductible (`--graine`), très pratique pour déboguer.
-* Détection de la partie bloquée (plus aucun coup légal).
-* Suite de tests unitaires.
-* Message d'erreur explicite si une image est illisible par Tk (Tk 8.6 ne lit
-  que PNG et GIF : un JPEG renommé en `.png` échoue avec un laconique
-  `couldn't recognize data in image file`).
-
----
-
-## Dépannage
-
-| Symptôme | Cause / solution |
-| --- | --- |
-| `_tkinter.TclError: bad argument "zoomed"` | ancienne version du code ; corrigé par `maximiser()` |
-| `ModuleNotFoundError: No module named 'tkinter'` | installer `python3-tk` (Debian/Ubuntu) |
-| `Impossible de trouver le dossier des images` | placer `Images/` à côté de `main.py`, ou utiliser `--images` |
-| `couldn't recognize data in image file` | l'image n'est pas un vrai PNG/GIF (JPEG renommé ?) ; reconvertir |
-| Le plateau déborde de l'écran | forcer une échelle plus petite : `--echelle 2/3` ou `--echelle 1/2` |
-
----
-
-## Pistes pour la suite
-
-* Glisser-déposer véritable (maintien du bouton) en complément du clic-clic.
-* Animation du déplacement des cartes et de la victoire.
-* Sauvegarde de la partie en cours et tableau des meilleurs scores.
-* Recherche du chemin **le plus court** (parcours en largeur ou A\*) plutôt que
-  de la première solution trouvée.
-* Générateur de donnes garanties gagnables, en s'appuyant sur le solveur.
+doit aboutir à une victoire). Trois tests verrouillent spécifiquement les
+non-régressions de l'aide : aucune position répétée en suivant 150 indices
+d'affilée, aucune carte baladée entre colonnes équivalentes dans une solution,
+et accumulation effective des nœuds lors de la reprise d'une analyse.

@@ -17,7 +17,7 @@ milliers. Les coups trouvés sont ensuite reconvertis en objets
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .cartes import Carte
 from .config import MAX_NOEUDS_SOLVEUR, MAX_SECONDES_SOLVEUR
@@ -190,6 +190,9 @@ def _coups_compacts(etat: tuple, tirage: int) -> list[tuple]:
             tete = visibles[k]
             nb = len(visibles) - k
             deplace_tout = k == 0 and not cachees
+            # Carte sur laquelle la tête repose actuellement (None si la tête
+            # est la première carte visible de sa colonne).
+            parent = visibles[k - 1] if k > 0 else None
             for j, (cachees_j, visibles_j) in enumerate(colonnes):
                 if j == i:
                     continue
@@ -201,6 +204,18 @@ def _coups_compacts(etat: tuple, tirage: int) -> list[tuple]:
                 elif visibles_j:
                     bas = visibles_j[-1]
                     if _valeur(tete) + 1 == _valeur(bas) and _rouge(tete) != _rouge(bas):
+                        # Élagage capital : passer d'un parent à un parent
+                        # *équivalent* (même valeur et même couleur) est un
+                        # coup nul. Sans cette règle, la recherche fait
+                        # osciller indéfiniment une carte entre deux dames de
+                        # même couleur, ce qui gonfle l'arbre et produit des
+                        # solutions truffées d'allers-retours absurdes.
+                        if (
+                            parent is not None
+                            and _valeur(parent) == _valeur(bas)
+                            and _rouge(parent) == _rouge(bas)
+                        ):
+                            continue
                         coup = ("cc", i, j, nb)
                         if k == 0 and cachees:
                             decouvertes.append(coup)
@@ -331,9 +346,39 @@ class Resultat:
         return (
             f"Analyse interrompue après {self.noeuds} positions et "
             f"{self.duree:.1f} s sans conclusion : la partie est peut-être "
-            "gagnable, mais la recherche est trop longue.\n\nVous pouvez "
-            "relancer l'analyse pour explorer davantage."
+            "gagnable, mais la recherche est trop longue.\n\nRelancer "
+            "l'analyse reprend l'exploration là où elle s'est arrêtée, avec un "
+            "budget doublé (rien n'est perdu)."
         )
+
+
+@dataclass
+class Budget:
+    """Limites de la recherche, **prolongeables en cours de route**.
+
+    Le budget est un objet mutable partagé avec le générateur de recherche :
+    quand il est épuisé, celui-ci se met en pause sans perdre son état. Il
+    suffit d'appeler :meth:`prolonger` puis de redemander un élément pour que
+    l'exploration reprenne exactement où elle s'était arrêtée — et non depuis
+    le début, ce qui rendait toute relance parfaitement inutile.
+    """
+
+    max_noeuds: int = MAX_NOEUDS_SOLVEUR
+    max_secondes: float = MAX_SECONDES_SOLVEUR
+    depart: float = field(default_factory=time.monotonic)
+
+    @property
+    def ecoule(self) -> float:
+        return time.monotonic() - self.depart
+
+    def epuise(self, noeuds: int) -> bool:
+        return noeuds > self.max_noeuds or self.ecoule > self.max_secondes
+
+    def prolonger(self, secondes: float, noeuds: int) -> None:
+        """Accorde ``secondes`` de plus **à partir de maintenant**, et
+        ``noeuds`` positions supplémentaires."""
+        self.max_secondes = self.ecoule + secondes
+        self.max_noeuds += noeuds
 
 
 def analyser(
@@ -367,8 +412,9 @@ def analyser(
             return Resultat(GAGNABLE, _convertir(partie, solution), 1, duree)
         return Resultat(PERDUE, [], 1, duree)
 
+    budget = Budget(max_noeuds, max_secondes, depart)
     noeuds = 0
-    for verdict, donnee, noeuds in _recherche_iter(etat, tirage, max_noeuds, max_secondes, depart):
+    for verdict, donnee, noeuds in _recherche_iter(etat, tirage, budget):
         if verdict == "progres":
             if doit_arreter is not None and doit_arreter():
                 duree = time.monotonic() - depart
@@ -385,7 +431,7 @@ def analyser(
     return Resultat(PERDUE, [], noeuds, time.monotonic() - depart)
 
 
-def _recherche_iter(etat, tirage, max_noeuds, max_secondes, depart):
+def _recherche_iter(etat, tirage, budget: Budget):
     """Parcours en profondeur avec table de transposition, sous forme de
     générateur repris pas à pas.
 
@@ -396,7 +442,10 @@ def _recherche_iter(etat, tirage, max_noeuds, max_secondes, depart):
 
     * ``("gagnable", coups_compacts, noeuds)``
     * ``("perdue", None, noeuds)`` — arbre entièrement exploré ;
-    * ``("indetermine", None, noeuds)`` — budget épuisé.
+    * ``("indetermine", None, noeuds)`` — budget épuisé. Ce dernier n'est
+      **pas** terminal : le générateur reste en pause, et si l'appelant
+      prolonge le budget (:meth:`Budget.prolonger`) avant de redemander un
+      élément, la recherche reprend là où elle s'était arrêtée.
     """
     visites = {hash(_cle(etat))}  # on ne stocke que les empreintes : moins de mémoire
     pile = [(etat, iter(_coups_compacts(etat, tirage)))]
@@ -406,9 +455,9 @@ def _recherche_iter(etat, tirage, max_noeuds, max_secondes, depart):
     while pile:
         noeuds += 1
         if noeuds % 2048 == 0:
-            if noeuds > max_noeuds or time.monotonic() - depart > max_secondes:
+            while budget.epuise(noeuds):
+                # Pause : l'appelant peut prolonger le budget puis reprendre.
                 yield ("indetermine", None, noeuds)
-                return
             yield ("progres", None, noeuds)
 
         courant, coups = pile[-1]
@@ -482,18 +531,50 @@ def _vers_coup(partie: Partie, compact: tuple) -> Coup:
 # --------------------------------------------------------------------------
 
 
-def meilleur_coup(partie: Partie) -> Coup | None:
-    """Renvoie le coup jugé le plus utile, ou ``None`` s'il n'y en a aucun."""
+def meilleur_coup(partie: Partie, eviter_retours: bool = True) -> Coup | None:
+    """Renvoie le coup jugé le plus utile, ou ``None`` s'il n'y en a aucun.
+
+    Si ``eviter_retours`` est vrai (le cas dans l'interface), tout coup qui
+    ramènerait à une position **déjà traversée** pendant la partie est écarté.
+    C'est ce qui empêche l'indice de tourner en rond — le grand classique étant
+    « déplace ce paquet, remets-le, redéplace-le… », chaque coup pris isolément
+    paraissant aussi bon que son inverse.
+    """
     coups = partie.coups_legaux(inclure_pioche=True)
     if not coups:
         return None
+
+    if eviter_retours:
+        utiles = [c for c in coups if not _ramene_en_arriere(partie, c)]
+        if not utiles:
+            # Tout coup possible — pioche comprise — ramène à une position déjà
+            # traversée : il n'y a objectivement plus rien de neuf à atteindre,
+            # autant le dire plutôt que de faire tourner le joueur en rond.
+            return None
+        coups = utiles
     return max(coups, key=lambda coup: _note(partie, coup))
 
 
+def _ramene_en_arriere(partie: Partie, coup: Coup) -> bool:
+    """Le coup mène-t-il à une position déjà rencontrée dans cette partie ?"""
+    if not partie.etats_vus:
+        return False
+    essai = partie.copie()
+    essai.etats_vus = set()
+    if not essai.appliquer(coup):
+        return False
+    return hash(essai.cle_etat()) in partie.etats_vus
+
+
 def _note(partie: Partie, coup: Coup) -> tuple:
-    """Note d'un coup ; plus la note est grande, plus le coup est conseillé."""
+    """Note d'un coup ; plus la note est grande, plus le coup est conseillé.
+
+    L'ordre des priorités est délibéré : un déplacement colonne → colonne qui
+    ne découvre aucune carte cachée passe **après** la pioche, car il ne fait
+    pas progresser la partie et c'est la source principale des allers-retours.
+    """
     if coup.est_pioche:
-        return (0, 0, 0)
+        return (10, 0, 0)
 
     carte = coup.carte
     assert carte is not None
@@ -509,20 +590,33 @@ def _note(partie: Partie, coup: Coup) -> tuple:
 
     if coup.origine == "colonne":
         colonne = partie.colonnes[coup.i_origine]
-        libere_carte = coup.nb == len(colonne.visibles) and bool(colonne.cachees)
-        vide_colonne = coup.nb == len(colonne.visibles) and not colonne.cachees
-        if libere_carte:
+        deplace_tout = coup.nb == len(colonne.visibles)
+        if deplace_tout and colonne.cachees:
             # Découvrir une carte cachée : le meilleur coup du tableau.
             return (50, len(colonne.cachees), carte.valeur)
-        if vide_colonne:
-            return (-5, 0, 0)  # simple déménagement, sans intérêt
-        return (20, 0, carte.valeur)
+        if deplace_tout:
+            return (-5, 0, 0)  # déménagement d'une colonne entière : inutile
+        # Scinder une suite ne fait rien progresser en soi : après la pioche.
+        return (5, 0, carte.valeur)
 
-    # Origine : défausse
+    # Origine : défausse — vider la défausse fait toujours avancer la partie.
     if partie.colonnes[coup.i_destination].est_vide:
         return (25, 0, carte.valeur)
     return (30, 0, carte.valeur)
 
+
+
+def verifier_solution(partie: Partie, coups: list[Coup]) -> bool:
+    """La suite de coups est-elle intégralement jouable et gagnante ?
+
+    Utilisée par les tests, et disponible pour vérifier une solution reçue du
+    solveur avant de s'y fier.
+    """
+    essai = partie.copie()
+    for coup in coups:
+        if not essai.appliquer(coup):
+            return False
+    return essai.est_gagnee
 
 
 def solution_partie_ouverte(partie: Partie) -> list[Coup] | None:

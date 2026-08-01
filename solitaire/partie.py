@@ -126,6 +126,7 @@ class Partie:
         self.nb_coups = 0
         self.nb_recyclages = 0
         self._historique: list[tuple] = []
+        self.etats_vus: set[int] = set()
         self.distribuer()
 
     # -- Mise en place ------------------------------------------------------
@@ -147,6 +148,10 @@ class Partie:
         self.nb_coups = 0
         self.nb_recyclages = 0
         self._historique = []
+        #: Empreintes des positions déjà traversées pendant la partie. Sert à
+        #: l'indice pour ne jamais conseiller un coup qui ramène à une
+        #: position déjà vue (les allers-retours sans fin).
+        self.etats_vus = {hash(self.cle_etat())}
 
     # -- Accès pratiques ----------------------------------------------------
 
@@ -176,6 +181,27 @@ class Partie:
         """Les (au plus trois) cartes de la défausse effectivement dessinées."""
         nb = min(self.cartes_par_tirage, len(self.defausse), 3)
         return self.defausse[-nb:] if nb else []
+
+    # -- Identité d'une position -------------------------------------------
+
+    def cle_etat(self) -> tuple:
+        """Clé canonique de la position courante.
+
+        Deux positions de même clé sont *le même coup à jouer* : l'ordre des
+        sept colonnes n'ayant aucune importance au jeu, elles sont triées.
+        Sert à repérer qu'on tourne en rond (voir :attr:`etats_vus`).
+        """
+        colonnes = tuple(
+            sorted(
+                (tuple(c.cachees), tuple(c.visibles)) for c in self.colonnes
+            )
+        )
+        return (
+            colonnes,
+            tuple(len(base) for base in self.bases),
+            tuple(self.pioche),
+            tuple(self.defausse),
+        )
 
     # -- Tests de légalité --------------------------------------------------
 
@@ -236,6 +262,7 @@ class Partie:
             cartes = self._prelever(coup)
             self._deposer(coup, cartes)
         self.nb_coups += 1
+        self.etats_vus.add(hash(self.cle_etat()))
         return True
 
     def _piocher(self) -> None:
@@ -361,6 +388,9 @@ class Partie:
         """Revient à l'état précédant le dernier coup."""
         if not self._historique:
             return False
+        # La position que l'on quitte n'a plus été « vue » : sans cela,
+        # l'indice refuserait de reproposer le coup que l'on vient d'annuler.
+        self.etats_vus.discard(hash(self.cle_etat()))
         self.restaurer(self._historique.pop())
         return True
 
@@ -371,6 +401,7 @@ class Partie:
         autre.graine = self.graine
         autre._historique = []
         autre.restaurer(self.instantane())
+        autre.etats_vus = set(self.etats_vus)
         return autre
 
     # -- Divers -------------------------------------------------------------

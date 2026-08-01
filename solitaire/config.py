@@ -102,3 +102,10 @@ ECHELLES = ((1, 1), (5, 6), (3, 4), (2, 3), (1, 2), (2, 5), (1, 3))
 
 MAX_NOEUDS_SOLVEUR = 1_500_000
 MAX_SECONDES_SOLVEUR = 20.0
+
+#: Vitesse de la finition automatique, en millisecondes par coup.
+MS_PAR_COUP_FINITION = 40
+
+#: Couleurs du surlignage de l'indice (origine et destination).
+COULEUR_SURLIGNAGE_DEFAUT = "#ffd400"
+COULEUR_DESTINATION_DEFAUT = "#ff5252"
